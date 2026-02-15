@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+translateagent/
+venv/
+env/
+.env
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+
+# Project Specific
+opera in histroy.pdf
+data/chroma_db/
+data/input/
+data/output/
+data/glossary.json
+data/glossary_backup.json
+.permission_reports/
+.permission_reports/**/
+*.tmp
+*.log
+_audit_result.txt
+
+plan.md
+develop plan.md

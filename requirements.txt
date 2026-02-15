@@ -1,0 +1,18 @@
+# Agents
+langchain
+langchain_openai
+langchain_community
+langgraph
+
+# Knowledge Base
+chromadb
+tiktoken
+
+# Config
+PyYAML
+
+# OCR
+magic-pdf
+
+# Output
+pypandoc

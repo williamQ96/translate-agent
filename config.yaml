@@ -1,0 +1,102 @@
+project:
+  name: "Translate Agent"
+  root_dir: "."
+
+directories:
+  input: "data/input"
+  output: "data/output"
+  glossary: "data/glossary.json"
+
+model:
+  # Ollama serves an OpenAI-compatible API on port 11434
+  api_base: "http://localhost:11434/v1"
+  api_key: "ollama"
+  # v0.3 dual-model baseline: 8b default + 30b escalation
+  name: "qwen3:8b"
+  translate_timeout: 180
+  translate_max_tokens: 3072
+  rewrite_timeout: 180
+  audit_timeout: 120
+  max_tokens: 8192
+  temperature: 0.3
+
+model_router:
+  enabled: true
+  default_model: "qwen3:8b"
+  escalation_model: "qwen3:30b"
+  escalation_after_loops: 2
+  max_escalations_per_chunk: 2
+  escalate_below_score: 5
+  escalate_on_human_attention: true
+  escalate_on_persistent_critical_flags: true
+  fallback_on_timeout: true
+  escalation_timeout: 120
+
+chunking:
+  chunk_size: 2000    # tokens per chunk
+  overlap: 200        # overlap between chunks for context continuity
+
+ocr:
+  engine: "miner_u"
+
+rag:
+  persist_directory: "data/chroma_db"
+  collection_name: "document_context"
+
+retrieval:
+  mode: "hybrid"     # dense|hybrid
+  dense_k: 6
+  lexical_k: 8
+  rrf_k: 60
+  context_max_chars: 2200
+  min_confidence: 0.25
+
+rerank:
+  enabled: true
+  provider: "heuristic"  # heuristic|local_cross_encoder
+  model: "cross-encoder/ms-marco-MiniLM-L-6-v2"
+  top_n: 10
+  keep_k: 3
+  timeout: 10
+
+self_correction:
+  enabled: true
+  max_retrieval_retries: 1
+
+web_search:
+  enabled: false
+  provider: "wikipedia"  # off|wikipedia|tavily|bing
+  timeout: 8
+  max_results: 2
+  fallback_min_confidence: 0.22
+  cache_path: "data/cache/web_context.json"
+  # Leave empty for no allowlist check.
+  allowed_domains: []
+
+timing:
+  print_loop_start: true
+  print_loop_elapsed: true
+  print_cumulative_runtime: true
+  slow_chunk_threshold_sec: 240
+
+logging:
+  tee_terminal_output: true
+  master_log_path: "data/output/logs/pipeline_latest.log"
+  loop_log_dir: "logs"
+  chunk_log_dir: "logs"
+
+audit:
+  pass_score: 8
+  use_rag: true
+  rag_k: 2
+  rag_max_chars: 1200
+  require_evidence_for_hallucination: true
+  weak_evidence_mark_human_attention: true
+
+translation:
+  max_attempts: 2
+  rag_k: 3
+  glossary_max_chars: 1600
+  rag_max_chars: 2200
+  segment_threshold_chars: 7000
+  segment_size_chars: 3200
