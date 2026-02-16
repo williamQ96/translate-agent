@@ -273,3 +273,65 @@ Add (proposed) sections to `config.yaml`:
 12. GraphRAG paper: https://arxiv.org/abs/2404.16130
 13. Microsoft GraphRAG repo: https://github.com/microsoft/graphrag
 14. Tavily Search API: https://docs.tavily.com/documentation/api-reference/endpoint/search
+
+## 9) Beads Integration Feasibility (Research)
+
+### Summary
+
+`beads` can be integrated into this project as an optional memory/trace layer, but it should not replace runtime translation logic.
+
+### Why it is relevant
+
+1. This project has long iterative loops (audit/rewrite), and `beads` is designed for persistent, branchable context/memory.
+2. It provides CLI + daemon + MCP server, which can help capture decision history and chunk-level learning across runs.
+
+### Practical fit for this repo
+
+Good fit for:
+
+1. Storing loop decisions per chunk (why accepted/rejected).
+2. Storing glossary decisions and term disambiguation evidence.
+3. Preserving human-attention interventions and later outcomes.
+4. Reusing memory across books/projects (if desired).
+
+Not a fit for:
+
+1. Replacing retrieval index (Chroma/BM25/RRF remain primary retrieval path).
+2. Replacing audit scoring logic directly.
+
+### Risks / constraints
+
+1. Adds an extra operational component (daemon + storage backend, typically Dolt).
+2. Needs clear boundaries to avoid prompt bloat.
+3. Should be optional and fail-open (pipeline continues if beads is unavailable).
+
+### Recommended rollout (optional module)
+
+Phase B1:
+
+1. Add `memory_provider: none|beads` config.
+2. Add lightweight adapter (`src/memory/beads_adapter.py`) with methods:
+   - `record_chunk_event(...)`
+   - `record_audit_result(...)`
+   - `record_human_resolution(...)`
+   - `get_chunk_memory(...)`
+3. Write-only first (no prompt reads yet).
+
+Phase B2:
+
+1. Read small memory snippets for only hard chunks.
+2. Add strict caps (`max_memory_items`, `max_memory_chars`).
+3. Log memory-hit rates and impact on scores/timeouts.
+
+### Success criteria for beads pilot
+
+1. Lower repeated rewrite rejection rate on same chunks.
+2. Better score stability after human-attention resolution.
+3. No significant throughput regression.
+
+### Sources used
+
+1. Beads repo README (CLI/daemon/MCP overview): https://github.com/steveyegge/beads
+2. Beads docs site: https://beads.ignition.dev/
+3. Installation docs (tooling/setup path): https://beads.ignition.dev/docs/installation
+4. MCP integration docs: https://beads.ignition.dev/docs/integrations/mcp-server

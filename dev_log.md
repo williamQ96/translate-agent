@@ -141,3 +141,32 @@ Planned from `dev_plan.md`:
 1. Primary risk now: long rewrite latency on hard chunks.
 2. Primary stability status: core pipeline is runnable and no longer failing on prior runtime type/signature errors.
 3. Next tuning focus: model routing thresholds + timeout budgets + rewrite acceptance strategy.
+
+## 2026-02-15 Beads Research + 3-Chunk Loop Test
+
+### Beads research decision
+1. `beads` is feasible as an optional memory/trace layer.
+2. Best use in this project:
+   - store chunk rewrite decisions and audit outcomes
+   - store human-attention resolutions and glossary choices
+3. Not recommended as a replacement for current retrieval stack (hybrid RAG remains primary).
+4. Integration should be fail-open (pipeline continues when beads is unavailable).
+
+### 3-chunk stress test (`chunk 1,2,4`, `max_loops=5`)
+Run:
+`data/output/_smoke_tests/smoke_20260215_170931/rewrites/rewrite_loop_run_20260215_171005`
+
+Loop averages:
+1. Loop 0: `7.3`
+2. Loop 1: `8.3`
+3. Loop 2: `8.0`
+4. Loop 3: `9.0` (all chunks locked, loop stops)
+
+Chunk trajectories:
+1. Chunk 1: `5 -> 5 -> 8 -> 9`
+2. Chunk 2: `9 -> 10`
+3. Chunk 4: `8 -> 10`
+
+Conclusion:
+1. Trend is improving overall, but not strictly monotonic (Loop 1 -> 2 dipped).
+2. Convergence achieved by Loop 3 for this 3-chunk case.
