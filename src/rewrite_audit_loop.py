@@ -760,12 +760,24 @@ def main() -> None:
                         candidate_rag_context = rag_store.retrieve_context(candidate_rag_context, k=audit_rag_k)[
                             :audit_rag_max_chars
                         ]
-                    candidate_audit = audit_chunk(
-                        audit_llm,
-                        pair["source"],
-                        rewritten,
-                        rag_context=candidate_rag_context,
-                    )
+                    try:
+                        candidate_audit = audit_chunk(
+                            audit_llm,
+                            pair["source"],
+                            rewritten,
+                            rag_context=candidate_rag_context,
+                        )
+                    except Exception as exc:
+                        reason = f"candidate_audit_error:{type(exc).__name__}"
+                        print(f"skip ({reason})")
+                        rejected.append(
+                            {
+                                "chunk_num": chunk_num,
+                                "decision": reason,
+                                "candidate_score": None,
+                            }
+                        )
+                        continue
                     accepted, decision = _accept_rewrite_candidate(
                         prev_score=score,
                         prev_tag_count=prev_tag_count,
