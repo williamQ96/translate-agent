@@ -1,13 +1,14 @@
 
 import os
-import sys
 import subprocess
+import sys
 import time
 
 def debug_ocr():
     # 1. Config path
-    root_dir = os.getcwd()
-    config_path = os.path.join(root_dir, 'magic-pdf.json')
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    root_dir = os.path.dirname(script_dir)
+    config_path = os.path.join(root_dir, "config", "magic-pdf.json")
     
     if not os.path.exists(config_path):
         print(f"ERROR: config not found at {config_path}")
@@ -25,13 +26,13 @@ def debug_ocr():
         print(f"DEBUG: rapid_table import failed: {e}")
 
     # 3. Command
-    pdf_path = r"data\input\opera in histroy.pdf"
-    output_dir = r"data\output\debug_ocr"
+    pdf_path = os.path.join(root_dir, "data", "input", "opera in histroy.pdf")
+    output_dir = os.path.join(root_dir, "data", "output", "debug_ocr")
     os.makedirs(output_dir, exist_ok=True)
     
     # Try using magic-pdf.exe directly which is in the same folder as python.exe
-    script_dir = os.path.dirname(sys.executable)
-    magic_pdf_exe = os.path.join(script_dir, "magic-pdf.exe")
+    exe_dir = os.path.dirname(sys.executable)
+    magic_pdf_exe = os.path.join(exe_dir, "magic-pdf.exe")
     
     if os.path.exists(magic_pdf_exe):
         cmd = [

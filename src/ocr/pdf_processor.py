@@ -41,7 +41,9 @@ class PDFProcessor:
         try:
             # Set environment variable for magic-pdf config
             env = os.environ.copy()
-            env['MINERU_TOOLS_CONFIG_JSON'] = os.path.join(self.config['project']['root_dir'], 'magic-pdf.json')
+            env['MINERU_TOOLS_CONFIG_JSON'] = os.path.join(
+                self.config['project']['root_dir'], 'config', 'magic-pdf.json'
+            )
 
             result = subprocess.run(
                 [sys.executable, "-m", "magic_pdf.tools.cli", 
@@ -53,7 +55,7 @@ class PDFProcessor:
                 print(f"  ⚠ MinerU failed: {result.stderr}")
                 # Check for common configuration error
                 if "son not found" in result.stderr or "models.json" in result.stderr:
-                     print("  ⚠ Hint: detailed configuration might be missing in magic-pdf.json.")
+                     print("  ⚠ Hint: detailed configuration might be missing in config/magic-pdf.json.")
                 raise RuntimeError(f"MinerU OCR failed with exit code {result.returncode}")
             
         except FileNotFoundError:

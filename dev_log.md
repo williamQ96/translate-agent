@@ -170,3 +170,23 @@ Chunk trajectories:
 Conclusion:
 1. Trend is improving overall, but not strictly monotonic (Loop 1 -> 2 dipped).
 2. Convergence achieved by Loop 3 for this 3-chunk case.
+
+## 2026-02-15 Publish-Ready Cleanup + Docs Refresh
+
+### Completed
+1. Added artifact archiver script:
+   - `scripts/archive_output_artifacts.py`
+   - archives `data/output` runtime artifacts into `data/output/legacy_data/<run_name>/`
+   - supports dry-run/copy/move and manifest output
+2. Root cleanup:
+   - moved helper/debug entry scripts from root into `scripts/`
+   - moved `magic-pdf.json` into `config/magic-pdf.json`
+   - updated OCR code path references
+3. README refresh (EN + ZH):
+   - documented dual-model strategy
+   - documented beads integration plan
+   - documented interactive GUI as planned feature
+   - added evidence-based domain-positioning wording
+4. Git hygiene:
+   - `.gitignore` now excludes private planning docs (`dev_plan.md`, `instruction.md`)
+   - untracked those docs from git index for local-only usage

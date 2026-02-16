@@ -1,132 +1,137 @@
 # Translate Agent
 
-Chunk-first local translation pipeline for long documents (English -> Chinese), with integrated quality loop.
+Chunk-first, local-first pipeline for long-form book translation (English -> Chinese), with iterative quality control.
 
-## Language Docs
+## What We Ship Today
 
-- English: `README.md`
-- Chinese: `README.zh-CN.md`
+1. End-to-end chunk pipeline: translate -> audit -> rewrite -> re-audit -> assemble.
+2. Dual-model routing:
+   - default fast path: `qwen3:8b`
+   - hard-chunk escalation: `qwen3:30b`
+3. Hybrid retrieval stack:
+   - dense retrieval + lexical retrieval + fusion
+   - glossary-aware prompting
+4. Chunk-level audit and locking:
+   - lock chunks that meet target score
+   - skip low-value rewrite candidates
+5. Operational scripts:
+   - smoke tests
+   - artifact export
+   - audit JSON -> readable report/CSV
+   - output archiving to legacy folders
+   - permission diagnostics
 
-## Project Summary
+## Current Pipeline
 
-Translate Agent is built for OCR-heavy books and long-form manuscripts where consistency and iterative quality control matter.
+`src.pipeline` runs these stages by default:
 
-Core design:
-
-1. Organize source into stable chunk files first.
-2. Translate each chunk with glossary + RAG support.
-3. Keep first-pass translation style-neutral.
-4. Apply optional style only at polish/review stage.
-5. Run chunk-level audit and iterative rewrite loop.
-6. Re-assemble chunks into book-level markdown outputs.
-
-## Current Pipeline (End-to-End)
-
-`src.pipeline` now runs all stages by default:
-
-1. OCR / input ingestion (`.pdf`, `.md`, `.txt`, or OCR directory)
+1. OCR/input ingestion (`.pdf`, `.md`, `.txt`, or OCR directory)
 2. Source chunk organization (`data/output/source_chunks`)
 3. Glossary extraction/reuse (`data/glossary.json`)
-4. RAG indexing (ChromaDB)
-5. Chunk translation (`translator -> reviewer/polisher`)
+4. RAG indexing
+5. Chunk translation + polish
 6. Assembly (`data/output/*_translated.md`)
 7. Chunk-level audit (`src.audit`)
 8. Iterative rewrite loop (`src.rewrite_audit_loop`)
 
-## Status Snapshot (From Latest Artifacts)
+## Interactive GUI (Planned)
 
-This snapshot is based on current workspace artifacts:
+Interactive GUI is planned (not shipped yet). Proposed scope:
 
-- Pipeline log: `data/output/MinerU_processed_pipeline.log`
-- Active rewrite run: `data/output/rewrites/rewrite_loop_run_20260213_174529`
-- Loop state: `data/output/rewrites/rewrite_loop_run_20260213_174529/loop_state.json`
+1. Start/stop/resume pipeline runs
+2. Live loop progress (per-loop scores, locked chunks, time)
+3. Human-attention chunk review panel
+4. One-click export of delivery bundle (full markdown + latest chunks)
 
-Observed status:
+## Beads Integration Plan (Planned)
 
-1. Rewrite loop progressed to `next_loop=11`.
-2. Locked chunks: `22/52` at target score `9`.
-3. Last completed loop in history: `loop 10`.
-4. Last loop had `16` human-attention chunks and `7` rejected rewrite candidates (guarded acceptance).
+`beads` is being evaluated as an optional memory/trace layer, not as a replacement for RAG.
 
-## Key Quality Controls
+Planned usage:
 
-1. Chunk-level source/translation alignment (`source_chunks` + `chunks`).
-2. Audit against original source chunks, not only assembled whole-book text.
-3. Human-attention flag for low-confidence/ambiguous audit cases.
-4. Guarded rewrite acceptance to reduce regression across loops.
-5. Per-loop evidence folders (`loop1`, `loop2`, ...) with:
-   - loop audit report copy
-   - accepted rewrite chunks
-   - rejected rewrite candidates
+1. Persist per-chunk rewrite decisions and audit outcomes
+2. Persist human-review resolutions and term decisions
+3. Reuse memory on recurrent hard chunks
+
+Design constraint:
+
+1. Fail-open integration (pipeline still runs when beads is unavailable)
+
+## Domain Positioning (Evidence-Based)
+
+Short answer: this project is strong and differentiated in workflow design, but we should not claim global uniqueness yet.
+
+Why:
+
+1. Document-level AI translation products already exist (DeepL document translation, Google Docs translation, Kindle/Amazon translation features).
+2. The domain is active and competitive.
+3. Our differentiator is the engineering stack:
+   - chunk-to-chunk source auditing
+   - iterative lock/rewrite loop
+   - local-first dual-model routing
+   - artifact traceability and reproducible runs
+
+Recommended claim wording:
+
+1. "A robust open-source workflow for publication-oriented long-book translation with iterative quality control."
+2. Avoid claiming "world-first" or "industry-leading" without benchmark studies.
+
+## Directory Layout (Publish-Friendly)
+
+Keep root clean; keep runtime artifacts under `data/`.
+
+1. `src/` - core application code
+2. `scripts/` - operational scripts and debug tools
+3. `config/` - runtime config files (for example `config/magic-pdf.json`)
+4. `data/input/` - source files
+5. `data/output/` - generated artifacts (chunks, audits, rewrites, logs, smoke runs)
+6. `data/output/legacy_data/` - archived historical runs
 
 ## Main Commands
 
-Run full pipeline from OCR directory (recommended):
+Run full pipeline:
 
 ```bash
 python -m src.pipeline --source "data/input/MinerU_processed" --style "Readable, preserve original tone, localized Chinese"
 ```
 
-Run full pipeline with neutral polish style:
+Run smoke test (3-4 chunks):
 
 ```bash
-python -m src.pipeline --source "data/input/MinerU_processed" --no-style-prompt
+powershell -ExecutionPolicy Bypass -File .\scripts\smoke_test_4chunks.ps1 -ChunkIds "1,2,3,4" -MaxLoops 5
 ```
 
-Disable post-translation quality loop:
+Archive current output artifacts to legacy:
 
 ```bash
-python -m src.pipeline --source "data/input/MinerU_processed" --no-quality-loop
+python scripts/archive_output_artifacts.py --run-name "work_YYYYMMDD_HHMMSS" --include-ocr
 ```
 
-Tune rewrite-loop behavior from pipeline:
+Convert audit JSON to readable Chinese markdown + CSV:
 
 ```bash
-python -m src.pipeline \
-  --source "data/input/MinerU_processed" \
-  --loop-target-score 9 \
-  --loop-max-loops 30 \
-  --loop-acceptance-min-delta 1
+python scripts/audit_json_to_cn_report.py --input "path/to/audit_loop_XX.json"
 ```
-
-Allow auto-rewrite even for human-attention chunks:
-
-```bash
-python -m src.pipeline --source "data/input/MinerU_processed" --loop-rewrite-human-attention
-```
-
-Run audit/rewrite manually (if needed):
-
-```bash
-python -m src.audit --source-chunks-dir "data/output/source_chunks" --chunks-dir "data/output/chunks"
-python -m src.rewrite_audit_loop --source-chunks-dir "data/output/source_chunks" --chunks-dir "data/output/chunks"
-```
-
-## Important Output Paths
-
-1. Source chunks: `data/output/source_chunks/chunk_XXX.md`
-2. First translated chunks: `data/output/chunks/chunk_XXX.md`
-3. First assembled book: `data/output/*_translated.md`
-4. Rewrite runs: `data/output/rewrites/rewrite_loop_run_YYYYMMDD_HHMMSS`
-5. Final rewritten assembled markdown (per run): `.../rewritten_translated.md`
-6. Pipeline log: `data/output/*_pipeline.log`
-
-## Directory Layout
-
-Keep runtime artifacts under `data/` only.
-
-1. `data/input/`: source files (pdf/md/txt/OCR folders)
-2. `data/output/`: all generated runtime artifacts (chunks/audits/rewrites/logs/smoke tests)
-3. `data/output/logs/permission_reports/`: permission diagnostics reports
-4. `src/`: application code
-5. `scripts/`: operational helpers (smoke tests, converters, exports, diagnostics)
 
 ## Dependencies
 
-1. Python dependencies:
+1. Install dependencies:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-2. Ollama model endpoint configured in `config.yaml` (default `qwen3:8b`, with `qwen3:30b` escalation).
+2. Ensure Ollama models are available:
+
+```bash
+ollama pull qwen3:8b
+ollama pull qwen3:30b
+```
+
+## References
+
+1. Beads: https://github.com/steveyegge/beads
+2. Beads docs: https://beads.ignition.dev/
+3. DeepL document translation: https://support.deepl.com/hc/en-us/articles/360020698639-Translate-documents
+4. Google Docs translation: https://support.google.com/docs/answer/187189
+5. Amazon KDP translation feature: https://kdp.amazon.com/en_US/help/topic/GTH4C7FLRNCXSWJW
