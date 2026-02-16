@@ -2,6 +2,8 @@
 
 Chunk-first, local-first pipeline for long-form book translation (English -> Chinese), with iterative quality control.
 
+![logo_icon_text](img/logo_icon_texted.png)
+
 ## What We Ship Today
 
 1. End-to-end chunk pipeline: translate -> audit -> rewrite -> re-audit -> assemble.
@@ -20,6 +22,8 @@ Chunk-first, local-first pipeline for long-form book translation (English -> Chi
    - audit JSON -> readable report/CSV
    - output archiving to legacy folders
    - permission diagnostics
+
+![pipeline](img/pipeline%20figure.png)
 
 ## Current Pipeline
 

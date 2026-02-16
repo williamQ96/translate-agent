@@ -2,6 +2,8 @@
 
 面向长篇书籍翻译（英文 -> 中文）的本地化流水线，采用分块优先（chunk-first）与迭代质控闭环。
 
+![logo_icon_text](img/logo_icon_texted.png)
+
 ## 当前已实现能力
 
 1. 端到端流程：`translate -> audit -> rewrite -> re-audit -> assemble`
@@ -20,6 +22,8 @@
    - 审计 JSON 转可读报告/表格
    - 产物归档到 legacy
    - 权限诊断
+
+![pipeline](img/pipeline%20figure.png)
 
 ## 当前流水线
 
