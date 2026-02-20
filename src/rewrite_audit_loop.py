@@ -227,6 +227,17 @@ def _critical_tag_count(item: dict) -> int:
     return count
 
 
+def _meta_signature(meta: dict) -> tuple:
+    """Compact stability signature used for stagnation tracking across loops."""
+    if not isinstance(meta, dict):
+        return (None, (), None, None)
+    score = int(meta.get("score", 0) or 0)
+    tags = tuple(sorted(str(tag) for tag in (meta.get("tags", []) or [])))
+    verdict = str(meta.get("verdict", ""))
+    human = bool(meta.get("needs_human_attention", False))
+    return (score, tags, verdict, human)
+
+
 def _accept_rewrite_candidate(
     prev_score: int,
     prev_tag_count: int,
@@ -276,7 +287,7 @@ def _audit_selected_chunks(
     for pair in pairs:
         chunk_num = pair["chunk_num"]
         start = time.time()
-        print(f"  Auditing chunk {chunk_num}/{total_chunks}...", end=" ", flush=True)
+        _print_safe(f"  Auditing chunk {chunk_num}/{total_chunks}...")
         try:
             rag_context = ""
             if rag_store is not None:
@@ -285,18 +296,34 @@ def _audit_selected_chunks(
             audit = audit_chunk(llm, pair["source"], pair["translation"], rag_context=rag_context)
             elapsed = time.time() - start
             status = "PASS" if _is_effective_pass(audit, target_score) else "REWRITE"
+            score = int(audit.get("score", 0) or 0)
+            critical_flags: list[str] = []
+            if bool(audit.get("hallucination")):
+                critical_flags.append("hallucination")
+            if bool(audit.get("omission")):
+                critical_flags.append("omission")
+            if bool(audit.get("mistranslation")):
+                critical_flags.append("mistranslation")
+            if audit.get("format_ok") is False:
+                critical_flags.append("format")
+            if bool(audit.get("needs_human_attention")):
+                critical_flags.append("human_attention")
             audit["model_verdict"] = audit.get("verdict", "UNKNOWN")
             audit["verdict"] = status
             if status == "REWRITE" and not audit.get("issues"):
-                score = int(audit.get("score", 0) or 0)
                 if score < target_score:
                     audit["issues"] = [f"SCORE_BELOW_TARGET: {score}/{target_score}"]
-            _print_safe(f"{status} (score: {audit['score']}/10, {elapsed:.0f}s)")
+            reason_suffix = ""
+            if status == "REWRITE" and score >= target_score and critical_flags:
+                reason_suffix = f" | critical_flags: {','.join(critical_flags)}"
+            _print_safe(
+                f"chunk {chunk_num}/{total_chunks}: {status} (score: {score}/10, {elapsed:.0f}s){reason_suffix}"
+            )
             audit["chunk_num"] = chunk_num
             audit["chunk_file"] = pair["chunk_file"]
             results.append(audit)
         except Exception as exc:  # noqa: BLE001
-            print(f"ERROR: {exc}")
+            _print_safe(f"chunk {chunk_num}/{total_chunks}: ERROR: {exc}")
             results.append({"chunk_num": chunk_num, "error": str(exc), "verdict": "ERROR", "score": 0, "issues": []})
 
     passed = sum(1 for item in results if item.get("verdict") == "PASS")
@@ -326,13 +353,13 @@ def _audit_selected_chunks(
             indent=2,
         )
 
-    print("\n" + "=" * 50)
-    print(f"  LOOP {loop_id} AUDIT SUMMARY")
-    print(f"  Passed: {passed} | Flagged: {flagged} | Errors: {errors}")
-    print(f"  Needs human attention: {human_attention}")
-    print(f"  Average score: {avg_score:.1f}/10")
-    print(f"  Report: {report_path}")
-    print("=" * 50 + "\n")
+    _print_safe("\n" + "=" * 50)
+    _print_safe(f"  LOOP {loop_id} AUDIT SUMMARY")
+    _print_safe(f"  Passed: {passed} | Flagged: {flagged} | Errors: {errors}")
+    _print_safe(f"  Needs human attention: {human_attention}")
+    _print_safe(f"  Average score: {avg_score:.1f}/10")
+    _print_safe(f"  Report: {report_path}")
+    _print_safe("=" * 50 + "\n")
 
     return report_path, _load_report_meta(report_path)
 
@@ -340,6 +367,19 @@ def _audit_selected_chunks(
 def _save_state(state_path: str, state: dict) -> None:
     with open(state_path, "w", encoding="utf-8") as file:
         json.dump(state, file, ensure_ascii=False, indent=2)
+
+
+def _write_stall_snapshot(run_dir: str, loop_id: int, unresolved_rows: list[dict]) -> str:
+    snapshot_path = os.path.join(run_dir, f"stall_snapshot_loop_{loop_id:02d}.json")
+    payload = {
+        "timestamp": datetime.now().isoformat(),
+        "loop": loop_id,
+        "unresolved_count": len(unresolved_rows),
+        "unresolved": unresolved_rows,
+    }
+    with open(snapshot_path, "w", encoding="utf-8") as file:
+        json.dump(payload, file, ensure_ascii=False, indent=2)
+    return snapshot_path
 
 
 def _assess_seed_report(
@@ -489,6 +529,38 @@ def main() -> None:
             "Chunk still stays in audit until it locks or needs manual intervention."
         ),
     )
+    parser.add_argument(
+        "--rejection-cooldown-loops",
+        type=int,
+        default=2,
+        help=(
+            "Cooldown loops before a throttled chunk is retried again. "
+            "Prevents permanent backoff deadlocks."
+        ),
+    )
+    parser.add_argument(
+        "--audit-all-each-loop",
+        action="store_true",
+        help="Audit all unlocked chunks every loop (default: audit only updated chunks with periodic full audit).",
+    )
+    parser.add_argument(
+        "--full-audit-interval",
+        type=int,
+        default=5,
+        help="Run a full audit every N loops when using updated-only audit mode (default: 5).",
+    )
+    parser.add_argument(
+        "--stall-stop-loops",
+        type=int,
+        default=6,
+        help="Stop loop early when no new locks for N consecutive loops (default: 6).",
+    )
+    parser.add_argument(
+        "--stall-stop-min-loop",
+        type=int,
+        default=8,
+        help="Only apply stall-stop after this loop id (default: 8).",
+    )
     args = parser.parse_args()
 
     if args.target_score < 1 or args.target_score > 10:
@@ -536,6 +608,9 @@ def main() -> None:
     if os.path.exists(state_path):
         with open(state_path, "r", encoding="utf-8") as file:
             state = json.load(file)
+        state["max_loops"] = args.max_loops
+        state.setdefault("stagnation_streaks", {})
+        state.setdefault("zero_gain_streak", 0)
         locked_chunks = set(int(x) for x in state.get("locked_chunks", []))
         latest_meta = {int(k): v for k, v in state.get("latest_meta", {}).items()}
         stale_locked = sorted(num for num in locked_chunks if num not in all_chunk_set)
@@ -567,6 +642,8 @@ def main() -> None:
             "current_report": current_report_path,
             "locked_chunks": sorted(locked_chunks),
             "latest_meta": {str(k): v for k, v in latest_meta.items()},
+            "stagnation_streaks": {},
+            "zero_gain_streak": 0,
         }
         _save_state(state_path, state)
 
@@ -686,13 +763,21 @@ def main() -> None:
                 else [num for num in active_chunks if num not in set(human_attention_chunks)]
             )
             rejection_streaks = state.setdefault("rejection_streaks", {})
+            rejection_last_loop = state.setdefault("rejection_last_loop", {})
+            stagnation_streaks = state.setdefault("stagnation_streaks", {})
             throttled_rejections: list[int] = []
+            cooldown_released: list[int] = []
             filtered_chunks: list[int] = []
             for num in rewriteable_chunks:
                 reject_count = int(rejection_streaks.get(str(num), 0) or 0)
                 if reject_count >= int(args.max_same_signal_retries):
-                    throttled_rejections.append(num)
-                    continue
+                    last_reject_loop = int(rejection_last_loop.get(str(num), 0) or 0)
+                    # Temporary backoff: retry again after cooldown window.
+                    if last_reject_loop > 0 and (loop_id - last_reject_loop) <= int(args.rejection_cooldown_loops):
+                        throttled_rejections.append(num)
+                        continue
+                    rejection_streaks[str(num)] = max(0, int(args.max_same_signal_retries) - 1)
+                    cooldown_released.append(num)
                 filtered_chunks.append(num)
             rewriteable_chunks = filtered_chunks
 
@@ -702,6 +787,13 @@ def main() -> None:
                 _print_safe(
                     "Rewrite backoff (consecutive rejected rewrites) for "
                     f"{len(throttled_rejections)} chunks: {preview}{suffix}"
+                )
+            if cooldown_released:
+                preview = sorted(cooldown_released)[:10]
+                suffix = " ..." if len(cooldown_released) > 10 else ""
+                _print_safe(
+                    "Rewrite cooldown released for "
+                    f"{len(cooldown_released)} chunks: {preview}{suffix}"
                 )
 
             _print_safe(f"Active chunks to rewrite: {len(rewriteable_chunks)}")
@@ -725,13 +817,12 @@ def main() -> None:
                 issues = meta.get("issues", [])
                 tags = meta.get("tags", [])
                 score = int(meta.get("score", 0) or 0)
+                stagnation_rounds = int(stagnation_streaks.get(str(chunk_num), 0) or 0)
                 prev_tag_count = len([t for t in tags if t in {"HALLUCINATION", "OMISSION", "MISTRANSLATION", "FORMAT", "HUMAN_ATTENTION"}])
                 audit_input = os.path.basename(current_report_path)
 
-                print(
-                    f"  Rewriting chunk {chunk_num}... (audit={audit_input}, prev_score={score})",
-                    end=" ",
-                    flush=True,
+                _print_safe(
+                    f"  Rewriting chunk {chunk_num}... (audit={audit_input}, prev_score={score}, stagnation={stagnation_rounds})"
                 )
                 start = time.time()
                 rewritten, error = _rewrite_with_retry(
@@ -744,12 +835,21 @@ def main() -> None:
                     issues=issues,
                     tags=tags,
                     score=score,
+                    loop_index=loop_id,
+                    stagnation_rounds=stagnation_rounds,
                     max_attempts=2,
+                    log_fn=_print_safe,
                 )
                 elapsed = time.time() - start
+                route = getattr(writer, "last_route", {}) or {}
+                route_info = (
+                    f"model={route.get('model', 'unknown')} "
+                    f"escalated={bool(route.get('escalated', False))} "
+                    f"timeout={route.get('timeout', 'n/a')}"
+                )
 
                 if rewritten is None:
-                    print(f"FAILED ({elapsed:.0f}s): {error}")
+                    _print_safe(f"  Rewrite chunk {chunk_num}: FAILED ({elapsed:.0f}s): {error} | {route_info}")
                     failed.append({"chunk_num": chunk_num, "error": error})
                     continue
 
@@ -769,7 +869,9 @@ def main() -> None:
                         )
                     except Exception as exc:
                         reason = f"candidate_audit_error:{type(exc).__name__}"
-                        print(f"skip ({reason})")
+                        _print_safe(
+                            f"  Rewrite chunk {chunk_num}: skip ({reason}, {elapsed:.0f}s) | {route_info}"
+                        )
                         rejected.append(
                             {
                                 "chunk_num": chunk_num,
@@ -777,6 +879,16 @@ def main() -> None:
                                 "candidate_score": None,
                             }
                         )
+                        continue
+                    cand_score_probe = int(candidate_audit.get("score", 0) or 0)
+                    cand_tag_probe = _critical_tag_count(candidate_audit)
+                    cand_issues_probe = list(candidate_audit.get("issues") or [])
+                    if cand_score_probe == 0 and cand_tag_probe == 0 and not cand_issues_probe:
+                        reason = "candidate_audit_inconclusive:score0_no_flags"
+                        _print_safe(
+                            f"  Rewrite chunk {chunk_num}: skip ({reason}, {elapsed:.0f}s) | {route_info}"
+                        )
+                        failed.append({"chunk_num": chunk_num, "error": reason})
                         continue
                     accepted, decision = _accept_rewrite_candidate(
                         prev_score=score,
@@ -792,7 +904,9 @@ def main() -> None:
                                 f"INPUT {audit_input} -->\n\n"
                             )
                             file.write(rewritten)
-                        print(f"skip ({decision})")
+                        _print_safe(
+                            f"  Rewrite chunk {chunk_num}: skip ({decision}, {elapsed:.0f}s) | {route_info}"
+                        )
                         rejected.append(
                             {
                                 "chunk_num": chunk_num,
@@ -811,26 +925,57 @@ def main() -> None:
                     file.write(rewritten)
                 loop_chunk_path = os.path.join(loop_chunks_dir, f"chunk_{chunk_num:03d}.md")
                 shutil.copy2(out_path, loop_chunk_path)
-                print(f"done ({elapsed:.0f}s)")
+                _print_safe(f"  Rewrite chunk {chunk_num}: done ({elapsed:.0f}s) | {route_info}")
+
+            rejected_set = {int(item.get("chunk_num")) for item in rejected if item.get("chunk_num") is not None}
+            failed_set = {
+                num
+                for num in (_as_chunk_num(item) for item in failed)
+                if num is not None
+            }
+            accepted_set = set(rewriteable_chunks) - rejected_set - failed_set
 
             _print_safe(f"\n--- LOOP {loop_id} AUDIT PHASE ---")
             active_after_rewrite = [num for num in all_chunks if num not in locked_chunks]
-            new_report, loop_meta = _audit_selected_chunks(
-                source_md=args.source,
-                base_chunks_dir=args.chunks_dir,
-                rewrite_chunks_dir=chunks_work_dir,
-                chunk_numbers=active_after_rewrite,
-                llm=audit_llm,
-                output_audit_dir=audits_dir,
-                loop_id=loop_id,
-                target_score=args.target_score,
-                source_chunks_dir=args.source_chunks_dir,
-                rag_store=rag_store if audit_use_rag else None,
-                audit_rag_k=audit_rag_k,
-                audit_rag_max_chars=audit_rag_max_chars,
+            run_full_audit = bool(args.audit_all_each_loop) or (
+                int(args.full_audit_interval) > 0 and loop_id % int(args.full_audit_interval) == 0
             )
-            loop_report_copy = _copy_report_to_loop_dir(new_report, loop_dir)
+            if run_full_audit:
+                audit_targets = active_after_rewrite
+                if not args.audit_all_each_loop:
+                    _print_safe(
+                        f"Periodic full audit triggered (every {int(args.full_audit_interval)} loops): "
+                        f"{len(audit_targets)} chunks"
+                    )
+            else:
+                audit_targets = sorted(num for num in accepted_set if num in set(active_after_rewrite))
+                _print_safe(
+                    f"Audit scope: updated-only ({len(audit_targets)}/{len(active_after_rewrite)} chunks)"
+                )
 
+            loop_report_copy = ""
+            if audit_targets:
+                new_report, loop_meta = _audit_selected_chunks(
+                    source_md=args.source,
+                    base_chunks_dir=args.chunks_dir,
+                    rewrite_chunks_dir=chunks_work_dir,
+                    chunk_numbers=audit_targets,
+                    llm=audit_llm,
+                    output_audit_dir=audits_dir,
+                    loop_id=loop_id,
+                    target_score=args.target_score,
+                    source_chunks_dir=args.source_chunks_dir,
+                    rag_store=rag_store if audit_use_rag else None,
+                    audit_rag_k=audit_rag_k,
+                    audit_rag_max_chars=audit_rag_max_chars,
+                )
+                loop_report_copy = _copy_report_to_loop_dir(new_report, loop_dir)
+            else:
+                new_report = current_report_path
+                loop_meta = {}
+                _print_safe("No accepted rewrites to audit this loop. Reusing previous audit state.")
+
+            prev_meta_snapshot = {num: dict(latest_meta.get(num, {})) for num in active_after_rewrite}
             latest_meta.update(loop_meta)
             current_report_path = new_report
             newly_locked = {
@@ -850,6 +995,7 @@ def main() -> None:
                 "loop_chunks_dir": loop_chunks_dir,
                 "loop_rejected_dir": loop_rejected_dir,
                 "active_count": len(active_after_rewrite),
+                "audited_count": len(audit_targets),
                 "locked_after_loop": len(locked_chunks),
                 "newly_locked": sorted(newly_locked),
                 "human_attention_chunks": sorted(
@@ -863,26 +1009,65 @@ def main() -> None:
             state["current_report"] = current_report_path
             state["locked_chunks"] = sorted(locked_chunks)
             state["latest_meta"] = {str(k): v for k, v in latest_meta.items()}
-            _save_state(state_path, state)
 
             rejection_streaks = state.setdefault("rejection_streaks", {})
-            rejected_set = {int(item.get("chunk_num")) for item in rejected if item.get("chunk_num") is not None}
-            failed_set = {
-                num
-                for num in (_as_chunk_num(item) for item in failed)
-                if num is not None
-            }
-            accepted_set = set(rewriteable_chunks) - rejected_set - failed_set
             for num in rejected_set:
                 key = str(num)
                 rejection_streaks[key] = int(rejection_streaks.get(key, 0) or 0) + 1
+                rejection_last_loop[key] = loop_id
             for num in accepted_set:
-                rejection_streaks.pop(str(num), None)
+                key = str(num)
+                rejection_streaks.pop(key, None)
+                rejection_last_loop.pop(key, None)
+
+            # Stagnation tracking: consecutive loops where score/tags/verdict do not change.
+            for num in active_after_rewrite:
+                key = str(num)
+                if num in newly_locked:
+                    stagnation_streaks.pop(key, None)
+                    continue
+                previous_sig = _meta_signature(prev_meta_snapshot.get(num, {}))
+                current_sig = _meta_signature(latest_meta.get(num, {}))
+                if previous_sig == current_sig:
+                    stagnation_streaks[key] = int(stagnation_streaks.get(key, 0) or 0) + 1
+                else:
+                    stagnation_streaks[key] = 0
+
+            state["stagnation_streaks"] = stagnation_streaks
+            if gained > 0:
+                state["zero_gain_streak"] = 0
+            else:
+                state["zero_gain_streak"] = int(state.get("zero_gain_streak", 0) or 0) + 1
+            _save_state(state_path, state)
 
             _print_safe(
                 f"Loop {loop_id} progress: locked {len(locked_chunks)}/{len(all_chunks)} "
                 f"(+{gained} this loop, rejected rewrites: {len(rejected)})"
             )
+            if (
+                int(args.stall_stop_loops) > 0
+                and loop_id >= int(args.stall_stop_min_loop)
+                and int(state.get("zero_gain_streak", 0) or 0) >= int(args.stall_stop_loops)
+            ):
+                unresolved = sorted(num for num in all_chunks if num not in locked_chunks)
+                unresolved_rows = [
+                    {
+                        "chunk_num": num,
+                        "score": int((latest_meta.get(num, {}) or {}).get("score", 0) or 0),
+                        "tags": (latest_meta.get(num, {}) or {}).get("tags", []),
+                        "issues": (latest_meta.get(num, {}) or {}).get("issues", []),
+                        "stagnation_rounds": int(stagnation_streaks.get(str(num), 0) or 0),
+                        "rejection_streak": int(rejection_streaks.get(str(num), 0) or 0),
+                    }
+                    for num in unresolved
+                ]
+                snapshot_path = _write_stall_snapshot(run_dir, loop_id, unresolved_rows)
+                _print_safe(
+                    "Stop-loss triggered: no convergence improvement for "
+                    f"{int(state.get('zero_gain_streak', 0) or 0)} consecutive loops. "
+                    f"Snapshot: {snapshot_path}"
+                )
+                break
 
         final_output = os.path.join(run_dir, "rewritten_translated.md")
         _assemble_effective_markdown(args.chunks_dir, chunks_work_dir, all_chunks, final_output)
@@ -899,7 +1084,6 @@ def main() -> None:
 
 
 _ORIGINAL_PRINT_SAFE = _print_safe
-_LAST_PRINT_LINE = {"value": ""}
 _SEEN_LOOP_STATUS_LINES = set()
 _LOG_FILE_HANDLES = {"master": None, "loop": None}
 _LOOP_TIMING = {}
@@ -959,9 +1143,6 @@ def _print_safe(message: str) -> None:
         if text in _SEEN_LOOP_STATUS_LINES:
             return
         _SEEN_LOOP_STATUS_LINES.add(text)
-    elif _LAST_PRINT_LINE.get("value") == text:
-        return
-    _LAST_PRINT_LINE["value"] = text
     _ORIGINAL_PRINT_SAFE(text)
     for key in ("master", "loop"):
         handle = _LOG_FILE_HANDLES.get(key)

@@ -1,6 +1,7 @@
 # Translate Agent
 
 Chunk-first, local-first pipeline for long-form book translation (English -> Chinese), with iterative quality control.
+Chinese docs: `README.zh-CN.md` (alias: `readme_cn.md`).
 
 ![logo_icon_text](img/logo_icon_texted.png)
 
@@ -8,8 +9,8 @@ Chunk-first, local-first pipeline for long-form book translation (English -> Chi
 
 1. End-to-end chunk pipeline: translate -> audit -> rewrite -> re-audit -> assemble.
 2. Dual-model routing:
-   - default fast path: `qwen3:8b`
-   - hard-chunk escalation: `qwen3:30b`
+   - default fast path: `qwen3-8b`
+   - hard-chunk escalation: `qwen3-32b`
 3. Hybrid retrieval stack:
    - dense retrieval + lexical retrieval + fusion
    - glossary-aware prompting
@@ -117,20 +118,54 @@ Convert audit JSON to readable Chinese markdown + CSV:
 python scripts/audit_json_to_cn_report.py --input "path/to/audit_loop_XX.json"
 ```
 
-## Dependencies
+Build a delivery package (book + latest chunks + readable audit report):
 
-1. Install dependencies:
+```bash
+python scripts/build_delivery_package.py --run-dir "data/output/rewrites/rewrite_loop_run_YYYYMMDD_HHMMSS"
+```
+
+The delivery script creates:
+
+1. `rewritten_translated.md` at delivery root
+2. `original_chunks/` (source English chunks)
+3. `translated_chunks/` (effective latest chunks: base + rewrite overlay)
+4. latest full audit JSON + readable Chinese report (`.md`) + table (`.csv`)
+5. glossary JSON + manifest
+
+## Repository Hygiene
+
+1. Generated runtime data under `data/` is local-only and gitignored.
+2. Keep root focused on source code and docs (`src/`, `scripts/`, `config/`, `img/`, README files).
+3. Use delivery bundles for handoff instead of committing run artifacts.
+
+## Runtime Backend (v0.32: LM Studio)
+
+1. Install Python dependencies:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-2. Ensure Ollama models are available:
+2. Start LM Studio server (GUI or headless), OpenAI-compatible endpoint:
+
+- default expected endpoint: `http://127.0.0.1:1234/v1`
+- keep hardware strategy as `Priority Order` (5090 first, 4070Ti second)
+- recommended:
+  - `Limit Model Offload to Dedicated GPU Memory: ON`
+  - `Offload KV Cache to GPU Memory: ON`
+  - Guardrails: `Relaxed` (or `Balanced` if you prefer more safety)
+
+3. Check model IDs exposed by LM Studio:
 
 ```bash
-ollama pull qwen3:8b
-ollama pull qwen3:30b
+powershell -ExecutionPolicy Bypass -File .\scripts\check_lmstudio_models.ps1
 ```
+
+4. Ensure `config.yaml` model IDs match `/v1/models` output:
+
+- `model.name` (default path)
+- `model_router.default_model` (8B)
+- `model_router.escalation_model` (32B)
 
 ## References
 

@@ -8,25 +8,38 @@ directories:
   glossary: "data/glossary.json"
 
 model:
-  # Ollama serves an OpenAI-compatible API on port 11434
-  api_base: "http://localhost:11434/v1"
-  api_key: "ollama"
-  # v0.3 dual-model baseline: 8b default + 30b escalation
-  name: "qwen3:8b"
-  translate_timeout: 180
-  translate_max_tokens: 3072
-  rewrite_timeout: 180
+  # v0.32 default backend: LM Studio OpenAI-compatible server
+  # Headless server default endpoint is usually http://127.0.0.1:1234/v1
+  api_base: "http://127.0.0.1:1234/v1"
+  api_key: "lm-studio"
+  # Keep this aligned with GET /v1/models output from LM Studio
+  name: "qwen3-8b"
+  translate_timeout: 150
+  translate_max_tokens: 2048
+  rewrite_timeout: 150
   audit_timeout: 120
   max_tokens: 8192
   temperature: 0.3
 
 model_router:
   enabled: true
-  default_model: "qwen3:8b"
-  escalation_model: "qwen3:30b"
+  # Keep model IDs aligned with LM Studio's /v1/models response
+  default_model: "qwen3-8b"
+  escalation_model: "qwen3-32b"
+  # Single LM Studio server can route across GPUs internally (Priority Order).
+  default_api_base: "http://127.0.0.1:1234/v1"
+  escalation_api_base: "http://127.0.0.1:1234/v1"
+  default_temperature: 0.2
+  escalation_temperature: 0.05
+  default_max_tokens: 1600
+  escalation_max_tokens: 3072
   escalation_after_loops: 2
+  require_stagnation_for_escalation: true
+  stagnation_threshold_loops: 3
   max_escalations_per_chunk: 2
-  escalate_below_score: 5
+  # Convergence tuning: escalate stubborn 7-8/10 chunks after stagnation.
+  escalate_below_score: 8
+  escalate_stagnated_below_score: 9
   escalate_on_human_attention: true
   escalate_on_persistent_critical_flags: true
   fallback_on_timeout: true
@@ -50,6 +63,7 @@ retrieval:
   rrf_k: 60
   context_max_chars: 2200
   min_confidence: 0.25
+  log_trace: true
 
 rerank:
   enabled: true
@@ -64,7 +78,7 @@ self_correction:
   max_retrieval_retries: 1
 
 web_search:
-  enabled: false
+  enabled: true
   provider: "wikipedia"  # off|wikipedia|tavily|bing
   timeout: 8
   max_results: 2
@@ -92,6 +106,8 @@ audit:
   rag_max_chars: 1200
   require_evidence_for_hallucination: true
   weak_evidence_mark_human_attention: true
+  downgrade_omission_only_high_score: true
+  omission_only_high_score_threshold: 9
 
 translation:
   max_attempts: 2

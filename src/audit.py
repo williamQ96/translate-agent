@@ -82,6 +82,7 @@ AUDIT_WINDOW_POINTS = (
     ("MIDDLE", 0.50),
     ("END", 0.88),
 )
+AUDIT_MAX_WINDOWS = 8
 DEFAULT_AUDIT_PASS_SCORE = 8
 DEFAULT_AUDIT_RAG_K = 2
 DEFAULT_AUDIT_RAG_MAX_CHARS = 1200
@@ -246,27 +247,118 @@ def _extract_window(text: str, point: float, width: int) -> str:
 
 
 def _build_audit_inputs(source: str, translation: str) -> tuple[str, str]:
-    """For long chunks, audit aligned relative windows instead of naive head truncation."""
+    """
+    For long chunks, build broader aligned windows instead of only HEAD+BEGIN/MIDDLE/END.
+    This reduces false omission flags on large sections while keeping single-pass audit speed.
+    """
     if len(source) <= AUDIT_SAMPLE_SIZE and len(translation) <= AUDIT_SAMPLE_SIZE:
         return source, translation
 
-    source_head = source[:500]
-    translation_head = translation[:500]
+    max_len = max(len(source), len(translation))
+    dynamic_windows = max(4, min(AUDIT_MAX_WINDOWS, max_len // 2200 + 1))
+    window_size = max(500, min(1200, int(AUDIT_SAMPLE_SIZE / max(1, dynamic_windows - 1))))
+
+    source_head = source[:650]
+    translation_head = translation[:650]
+    source_tail = source[-650:] if len(source) > 650 else source
+    translation_tail = translation[-650:] if len(translation) > 650 else translation
     source_parts = []
     translation_parts = []
     source_parts.append(f"[HEAD]\n{source_head}")
     translation_parts.append(f"[HEAD]\n{translation_head}")
-    for label, point in AUDIT_WINDOW_POINTS:
-        source_parts.append(f"[{label}]\n{_extract_window(source, point, AUDIT_WINDOW_SIZE)}")
-        translation_parts.append(f"[{label}]\n{_extract_window(translation, point, AUDIT_WINDOW_SIZE)}")
+    for idx in range(dynamic_windows):
+        point = (idx + 0.5) / dynamic_windows
+        label = f"SEG_{idx + 1:02d}"
+        source_parts.append(f"[{label}]\n{_extract_window(source, point, window_size)}")
+        translation_parts.append(f"[{label}]\n{_extract_window(translation, point, window_size)}")
+    source_parts.append(f"[TAIL]\n{source_tail}")
+    translation_parts.append(f"[TAIL]\n{translation_tail}")
 
     return "\n\n".join(source_parts), "\n\n".join(translation_parts)
+
+
+def _is_sampled_audit_input(source_for_audit: str) -> bool:
+    markers = ("[HEAD]", "[TAIL]", "[SEG_", "[BEGIN]", "[MIDDLE]", "[END]")
+    return any(marker in source_for_audit for marker in markers)
 
 
 def _trim_for_prompt(text: str, max_chars: int) -> str:
     if not text:
         return ""
     return text[:max_chars]
+
+
+def _clean_audit_line(line: str) -> str:
+    """Normalize markdown-styled audit lines like '## SCORE: 6'."""
+    text = (line or "").strip()
+    # Strip leading markdown bullets / headings / list markers.
+    text = re.sub(r"^\s*[>#*\-\u2022]+\s*", "", text)
+    text = re.sub(r"^\s*\d+\s*[\.\)]\s*", "", text)
+    text = re.sub(r"^\s*#+\s*", "", text)
+    return text.strip()
+
+
+def _extract_score_from_text(text: str) -> int | None:
+    if not text:
+        return None
+    patterns = [
+        r"(?:SCORE|评分)\s*[:：]\s*(\d{1,2})",
+        r"(?:SCORE|评分)[^\d]{0,10}(\d{1,2})\s*/\s*10",
+    ]
+    upper = text.upper()
+    for pattern in patterns:
+        match = re.search(pattern, upper, flags=re.IGNORECASE)
+        if match:
+            try:
+                return int(match.group(1))
+            except Exception:
+                continue
+    return None
+
+
+def _extract_bool_from_field(line: str) -> bool | None:
+    text = str(line or "").strip()
+    normalized = text.upper().replace("：", ":")
+    tail_en = normalized.split(":", 1)[1].strip() if ":" in normalized else normalized
+    tail_raw = text.replace("：", ":")
+    tail_raw = tail_raw.split(":", 1)[1].strip() if ":" in tail_raw else tail_raw.strip()
+
+    # Prefer explicit English booleans from prompt schema.
+    if re.match(r"^(YES|TRUE)\b", tail_en):
+        return True
+    if re.match(r"^(NO|FALSE)\b", tail_en):
+        return False
+
+    # Optional Chinese fallback (exact-prefix, avoid matching "没有" as "有").
+    if re.match(r"^(没有|无|否|未)\b", tail_raw):
+        return False
+    if re.match(r"^(是|有)\b", tail_raw):
+        return True
+    return None
+
+
+def _line_has_label(line: str, english_label: str, chinese_label: str = "") -> bool:
+    normalized = line.upper().replace("：", ":")
+    if normalized.startswith(f"{english_label.upper()}:"):
+        return True
+    if chinese_label and line.startswith(f"{chinese_label}："):
+        return True
+    if chinese_label and line.startswith(f"{chinese_label}:"):
+        return True
+    return False
+
+
+def _extract_model_verdict(text: str) -> str:
+    normalized = (text or "").upper().replace("：", ":")
+    if re.search(r"(?:VERDICT|结论)\s*:\s*REWRITE", normalized):
+        return "REWRITE"
+    if re.search(r"(?:VERDICT|结论)\s*:\s*PASS", normalized):
+        return "PASS"
+    if "REWRITE" in normalized and "PASS" not in normalized:
+        return "REWRITE"
+    if "PASS" in normalized and "REWRITE" not in normalized:
+        return "PASS"
+    return "UNKNOWN"
 
 
 def _derive_verdict(parsed: dict, pass_score: int) -> str:
@@ -341,7 +433,7 @@ def _apply_audit_guardrails(parsed: dict, source_for_audit: str, translation_for
     parsed.setdefault("needs_human_attention", False)
     parsed.setdefault("human_attention_reason", "")
 
-    is_sampled = "[BEGIN]" in source_for_audit and "[MIDDLE]" in source_for_audit and "[END]" in source_for_audit
+    is_sampled = _is_sampled_audit_input(source_for_audit)
     short_fragment = len(source_for_audit) <= 260 and len(translation_for_audit) <= 260
     ocr_noisy = _looks_like_ocr_noisy_fragment(source_for_audit)
 
@@ -366,6 +458,27 @@ def _normalize_audit_result(parsed: dict, pass_score: int) -> dict:
     parsed["needs_human_attention"] = bool(parsed.get("needs_human_attention", False))
     parsed["human_attention_reason"] = (parsed.get("human_attention_reason") or "").strip()
     parsed["model_verdict"] = parsed.get("verdict", "UNKNOWN")
+
+    # Parse-failure guardrail:
+    # If audit output cannot be reliably structured (score=0, no flags, no issues),
+    # avoid treating it as a real quality regression.
+    has_any_flag = any(
+        [
+            bool(parsed.get("hallucination")),
+            bool(parsed.get("omission")),
+            bool(parsed.get("mistranslation")),
+            parsed.get("format_ok") is False,
+        ]
+    )
+    if parsed["score"] == 0 and not has_any_flag and not (parsed.get("issues") or []):
+        parsed["needs_human_attention"] = True
+        reason = "AUDIT_PARSE_FAILURE_UNSTRUCTURED_OUTPUT"
+        existing_reason = parsed.get("human_attention_reason", "")
+        parsed["human_attention_reason"] = "; ".join([x for x in [existing_reason, reason] if x])
+        parsed["issues"] = [f"AUDIT_PARSE_FAILURE: unstructured audit output (model_verdict={parsed['model_verdict']})"]
+        # Preserve loop stability: avoid artificial 0/10 collapse.
+        parsed["score"] = max(6, pass_score - 1)
+
     parsed["verdict"] = _derive_verdict(parsed, pass_score)
     if parsed["verdict"] == "REWRITE" and not parsed.get("issues"):
         score = int(parsed.get("score", 0) or 0)
@@ -410,31 +523,55 @@ def audit_chunk(llm, source: str, translation: str, rag_context: str = "") -> di
         "human_attention_reason": "",
     }
 
+    # First pass: robust global extraction.
+    global_score = _extract_score_from_text(result)
+    if global_score is not None:
+        parsed["score"] = int(global_score)
+    parsed["verdict"] = _extract_model_verdict(result)
+
+    # Second pass: per-line extraction with markdown-prefix tolerance.
     for line in result.strip().split("\n"):
-        row = line.strip()
-        row_upper = row.upper()
-        normalized = row_upper.replace("：", ":")
-        if normalized.startswith("SCORE:"):
-            try:
-                match = re.search(r"(\d+)", normalized)
-                if match:
-                    parsed["score"] = int(match.group(1))
-            except (ValueError, IndexError):
-                pass
-        elif normalized.startswith("HALLUCINATION:") and "YES" in normalized:
-            parsed["hallucination"] = True
-            parsed["issues"].append(row)
-        elif normalized.startswith("OMISSION:") and "YES" in normalized:
-            parsed["omission"] = True
-            parsed["issues"].append(row)
-        elif normalized.startswith("MISTRANSLATION:") and "YES" in normalized:
-            parsed["mistranslation"] = True
-            parsed["issues"].append(row)
-        elif normalized.startswith("FORMAT_OK:") and "NO" in normalized:
-            parsed["format_ok"] = False
-            parsed["issues"].append(row)
-        elif normalized.startswith("VERDICT:"):
-            parsed["verdict"] = "REWRITE" if "REWRITE" in normalized else "PASS"
+        row = _clean_audit_line(line)
+        if not row:
+            continue
+        normalized = row.upper().replace("：", ":")
+
+        if _line_has_label(row, "SCORE", "评分"):
+            local_score = _extract_score_from_text(row)
+            if local_score is not None:
+                parsed["score"] = int(local_score)
+            continue
+
+        if _line_has_label(row, "HALLUCINATION", "幻觉"):
+            state = _extract_bool_from_field(row)
+            if state is True:
+                parsed["hallucination"] = True
+                parsed["issues"].append(row)
+            continue
+
+        if _line_has_label(row, "OMISSION", "遗漏"):
+            state = _extract_bool_from_field(row)
+            if state is True:
+                parsed["omission"] = True
+                parsed["issues"].append(row)
+            continue
+
+        if _line_has_label(row, "MISTRANSLATION", "误译"):
+            state = _extract_bool_from_field(row)
+            if state is True:
+                parsed["mistranslation"] = True
+                parsed["issues"].append(row)
+            continue
+
+        if _line_has_label(row, "FORMAT_OK", "格式"):
+            state = _extract_bool_from_field(row)
+            if state is False:
+                parsed["format_ok"] = False
+                parsed["issues"].append(row)
+            continue
+
+        if _line_has_label(row, "VERDICT", "结论"):
+            parsed["verdict"] = _extract_model_verdict(row)
 
     parsed = _apply_audit_guardrails(parsed, source_for_audit, translation_for_audit)
     return _normalize_audit_result(parsed, pass_score)
@@ -689,6 +826,11 @@ def main():
 _ORIGINAL_APPLY_AUDIT_GUARDRAILS = _apply_audit_guardrails
 
 
+def _strip_issue_prefix(issues: list[str], prefix: str) -> list[str]:
+    normalized_prefix = prefix.upper().replace("：", ":")
+    return [item for item in issues if not str(item).upper().replace("：", ":").startswith(normalized_prefix)]
+
+
 def _apply_audit_guardrails(parsed: dict, source_for_audit: str, translation_for_audit: str) -> dict:
     """
     Phase 3 hardening:
@@ -725,6 +867,30 @@ def _apply_audit_guardrails(parsed: dict, source_for_audit: str, translation_for
                 guarded["score"] = max(int(guarded.get("score", 0) or 0), 6)
             except Exception:
                 pass
+
+    # Convergence guardrail:
+    # If high score and only OMISSION is flagged, treat as weak audit signal in sampled windows.
+    omission_only_cfg = bool(cfg.get("downgrade_omission_only_high_score", True))
+    omission_threshold = int(cfg.get("omission_only_high_score_threshold", 9))
+    if omission_only_cfg:
+        score = int(guarded.get("score", 0) or 0)
+        only_omission = bool(guarded.get("omission")) and not any(
+            [
+                bool(guarded.get("hallucination")),
+                bool(guarded.get("mistranslation")),
+                guarded.get("format_ok") is False,
+            ]
+        )
+        sampled = _is_sampled_audit_input(source_for_audit)
+        if sampled and only_omission and score >= omission_threshold:
+            guarded["omission"] = False
+            issues = list(guarded.get("issues") or [])
+            issues = _strip_issue_prefix(issues, "OMISSION:")
+            note = "AUDIT_GUARDRAIL: omission-only high-score sampled case downgraded"
+            if note not in issues:
+                issues.append(note)
+            guarded["issues"] = issues
+
     return guarded
 
 

@@ -13,11 +13,22 @@ env/
 
 # Project Specific
 opera in histroy.pdf
+# Runtime artifacts and local datasets
+data/
+!data/.gitkeep
+!data/.gitkeep/**
+
+# Optional: keep these explicit for readability
 data/chroma_db/
+data/cache/
 data/input/
 data/output/
 data/glossary.json
 data/glossary_backup.json
+
+# Delivery/export artifacts
+delivery/
+.delivery/
 .permission_reports/
 .permission_reports/**/
 *.tmp

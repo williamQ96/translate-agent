@@ -3,6 +3,103 @@
 This log summarizes project evolution from reconstructed `v0.1`, current `v0.2`, and planned `v0.3`.
 Reconstruction is based on repository artifacts, README status, pipeline logs, and prior implementation history.
 
+## v0.33 (Convergence Patch Pack: Router + Stop-loss + Logging + Long-Chunk Audit)
+
+### Scope
+Patch long-loop stagnation where chunks plateau at `7-8/10` with low lock gain over many loops.
+
+### Implemented
+1. Router convergence upgrade (`src/agents/writer.py`, `config.yaml`):
+   - added `model_router.escalate_stagnated_below_score`
+   - raised `model_router.escalate_below_score` from `5` to `8`
+   - route now escalates stagnated unresolved chunks (for example persistent `8/10`) to `32B` after configured stagnation threshold.
+2. Stop-loss mechanism (`src/rewrite_audit_loop.py`):
+   - new flags:
+     - `--stall-stop-loops` (default `6`)
+     - `--stall-stop-min-loop` (default `8`)
+   - when no new locks for N consecutive loops, loop exits early and writes:
+     - `stall_snapshot_loop_XX.json` with unresolved chunk diagnostics (score/tags/issues/stagnation/rejection streaks).
+3. Log completeness upgrade (`src/rewrite_audit_loop.py`, `src/rewrite_audit.py`):
+   - rewrite phase per-chunk status now logged with route metadata:
+     - model/escalated/timeout/stagnation
+   - retry/route messages from rewrite retry path are now routed through loop logger callback.
+   - audit summary lines now use `_print_safe` so they are persisted in loop logs.
+4. Long-chunk audit refactor (`src/audit.py`):
+   - replaced narrow `HEAD+BEGIN/MIDDLE/END` sampling with adaptive multi-window coverage:
+     - `[HEAD] + [SEG_XX ...] + [TAIL]`
+   - sampled-input detection generalized for guardrails to reduce false omission penalties on long chunks.
+5. Resume-state consistency (`src/rewrite_audit_loop.py`):
+   - when resuming existing run dir, `max_loops` in state now updates to current CLI value.
+   - persisted `zero_gain_streak` in loop state for convergence control.
+
+### Expected effect
+1. Fewer wasted loops in plateau phase.
+2. Better chance to unlock stubborn chunks via delayed 32B escalation.
+3. More complete loop diagnostics for root-cause analysis.
+
+## v0.34 (Audit Parse Hardening + Failed-Chunk Forensics)
+
+### Scope
+Fix anomalous `score=0` audit artifacts (for example `rejected(score 8->0)`) caused by brittle parser assumptions.
+
+### Implemented
+1. Audit parser robustness (`src/audit.py`):
+   - added markdown-tolerant line normalization (`## SCORE: 6` is now valid input).
+   - added global score extraction fallback (supports non-line-start score patterns).
+   - added verdict extraction fallback from full raw output.
+   - added bilingual label recognition paths for core fields.
+2. Rewrite candidate guard (`src/rewrite_audit_loop.py`):
+   - when candidate audit returns inconclusive payload (`score=0`, no flags, no issues), it is treated as `failed` (non-penalizing) instead of a hard `rejected` downgrade.
+3. Rewrite output sanitization (`src/agents/writer.py`):
+   - strips common audit/report leakage lines from model output (`SCORE/VERDICT/...`, “翻译质量审校报告”, “以下是根据...”).
+4. Forensics artifact generated:
+   - `data/output/rewrites/rewrite_loop_run_20260217_060555/diagnostics/failure_chunks_diag_*.md`
+   - captures source/effective translation/live raw audit/candidate rewrite for chunks `31/33/36/38`.
+
+### Result snapshot
+1. Re-auditing chunks `31/33/36/38` after patch no longer reproduces `score=0` parser collapse in sampled run.
+2. `chunk_038` case with heading-style raw (`# ... / ## SCORE: 6`) now parses score correctly.
+
+## v0.32 (LM Studio Switch + Dual-GPU Runtime Policy)
+
+### Scope
+1. Switch default inference backend from Ollama to LM Studio OpenAI-compatible server.
+2. Keep dual-model routing (`8B` fast path + `32B` escalation path).
+3. Align runtime policy with asymmetric dual-GPU hardware (`RTX 5090 + RTX 4070 Ti`).
+
+### Implemented changes
+1. `config.yaml` switched to LM Studio defaults:
+   - `model.api_base: http://127.0.0.1:1234/v1`
+   - `model.api_key: lm-studio`
+   - `model.name: qwen3-8b`
+   - `model_router.default_model: qwen3-8b`
+   - `model_router.escalation_model: qwen3-32b`
+   - `model_router.default_api_base/escalation_api_base` both set to LM Studio endpoint.
+2. Added model-ID validation script:
+   - `scripts/check_lmstudio_models.ps1`
+   - checks `/v1/models` and validates required IDs before pipeline run.
+3. Writer routing improvements carried into LM Studio mode:
+   - loop-aware escalation (`escalation_after_loops`)
+   - compact prompt path for small model speed
+   - strict-mode prompt path for large model precision
+   - route observability (`model/base/escalated/timeout`) in rewrite logs.
+4. Added dual Ollama launcher script in previous patch remains optional:
+   - `scripts/start_dual_ollama.ps1`
+   - now considered fallback path when not using LM Studio.
+
+### Runtime policy (from current hardware tuning)
+1. GPU strategy: `Priority Order` (5090 first, 4070 Ti second).
+2. Keep:
+   - `Limit Model Offload to Dedicated GPU Memory = ON`
+   - `Offload KV Cache to GPU Memory = ON`
+3. Guardrails recommendation:
+   - `Relaxed` for max capacity
+   - `Balanced` if stability margin is preferred.
+
+### Notes
+1. Model IDs in config must exactly match LM Studio `/v1/models` output.
+2. In this environment snapshot, `http://127.0.0.1:1234/v1/models` was not reachable; final endpoint/port should be confirmed on runtime machine.
+
 ## v0.1 (Reconstructed Baseline)
 
 ### Scope
@@ -190,3 +287,32 @@ Conclusion:
 4. Git hygiene:
    - `.gitignore` now excludes private planning docs (`dev_plan.md`, `instruction.md`)
    - untracked those docs from git index for local-only usage
+
+## 2026-02-20 Delivery Packaging Automation (v0.35)
+
+### Scope
+Added a one-command delivery packager and executed it on current run artifacts.
+
+### New script
+1. `scripts/build_delivery_package.py`
+   - creates timestamped delivery folder
+   - aggregates translated chunks into one book markdown at delivery root
+   - copies original chunks to `original_chunks/`
+   - copies latest effective translated chunks (base + rewrite overlay) to `translated_chunks/`
+   - runs a fresh full audit on delivery translated chunks
+   - uses `scripts/audit_json_to_cn_report.py` to generate Chinese readable report + CSV
+   - copies glossary to delivery root
+   - writes `DELIVERY_MANIFEST.md`
+
+### Execution result
+1. Delivery generated:
+   - `data/output/delivery/delivery_20260220_011302`
+2. Included artifacts:
+   - `rewritten_translated.md`
+   - `original_chunks/` (52 files)
+   - `translated_chunks/` (52 files)
+   - `audit_20260220_011609.json`
+   - `audit_20260220_011609_可读报告.md`
+   - `audit_20260220_011609_表格.csv`
+   - `glossary.json`
+   - `DELIVERY_MANIFEST.md`

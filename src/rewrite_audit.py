@@ -191,7 +191,8 @@ def _trim_for_prompt(text: str, max_chars: int) -> str:
 
 def _high_risk_rewrite_mode(source_text: str, tags: list[str], score: int) -> bool:
     """High-risk chunks should prefer strict source-only rewrite to avoid hallucination."""
-    risk_tags = {"HALLUCINATION", "OMISSION", "MISTRANSLATION", "FORMAT"}
+    # Omission alone is too broad/noisy in iterative loops; treat stronger failures as high-risk.
+    risk_tags = {"HALLUCINATION", "MISTRANSLATION", "FORMAT", "HUMAN_ATTENTION"}
     if any(tag in risk_tags for tag in tags):
         return True
     if score <= 5:
@@ -211,6 +212,8 @@ def _rewrite_chunk_with_strategy(
     issues: list[str],
     tags: list[str],
     score: int,
+    loop_index: int | None = None,
+    stagnation_rounds: int = 0,
 ) -> str:
     """Rewrite chunk with adaptive strategy to reduce hallucination on long chunks."""
     high_risk = _high_risk_rewrite_mode(source_text, tags, score)
@@ -227,8 +230,10 @@ def _rewrite_chunk_with_strategy(
             issues=issues,
             issue_tags=tags,
             audit_score=score,
+            loop_index=loop_index,
             glossary_text=glossary_text,
             rag_context=rag_context,
+            stagnation_rounds=stagnation_rounds,
         )
 
     segment_tags = list(dict.fromkeys(tags + ["FORCE_SOURCE_ONLY", "STRICT_LITERAL"]))
@@ -246,8 +251,10 @@ def _rewrite_chunk_with_strategy(
             issues=issues,
             issue_tags=segment_tags,
             audit_score=min(score, 3),
+            loop_index=loop_index,
             glossary_text=seg_glossary,
             rag_context=seg_context,
+            stagnation_rounds=stagnation_rounds,
         )
         outputs.append(rewritten.strip())
     return "\n\n".join(outputs)
@@ -263,7 +270,10 @@ def _rewrite_with_retry(
     issues: list[str],
     tags: list[str],
     score: int,
+    loop_index: int | None = None,
+    stagnation_rounds: int = 0,
     max_attempts: int = 2,
+    log_fn=None,
 ) -> tuple[str | None, str | None]:
     """Attempt rewrite with fallback strategy on timeout/errors.
 
@@ -285,7 +295,24 @@ def _rewrite_with_retry(
                     issues=issues,
                     tags=tags,
                     score=score,
+                    loop_index=loop_index,
+                    stagnation_rounds=stagnation_rounds,
                 )
+                route = getattr(writer, "last_route", {}) or {}
+                if route:
+                    model_name = route.get("model", "unknown")
+                    api_base = route.get("api_base", "unknown")
+                    escalated = bool(route.get("escalated", False))
+                    timeout = route.get("timeout", "n/a")
+                    stagnation = route.get("stagnation_rounds", 0)
+                    msg = (
+                        f"[route attempt={attempt} model={model_name} base={api_base} "
+                        f"escalated={escalated} timeout={timeout} stagnation={stagnation}]"
+                    )
+                    if callable(log_fn):
+                        log_fn(msg)
+                    else:
+                        print(msg)
             else:
                 # Fallback: force strict source-only rewrite with minimal context.
                 fallback_tags = list(dict.fromkeys(tags + ["FORCE_SOURCE_ONLY", "STRICT_LITERAL"]))
@@ -299,12 +326,32 @@ def _rewrite_with_retry(
                     issues=issues,
                     tags=fallback_tags,
                     score=min(score, 2),
+                    loop_index=loop_index,
+                    stagnation_rounds=stagnation_rounds,
                 )
+                route = getattr(writer, "last_route", {}) or {}
+                if route:
+                    model_name = route.get("model", "unknown")
+                    api_base = route.get("api_base", "unknown")
+                    escalated = bool(route.get("escalated", False))
+                    timeout = route.get("timeout", "n/a")
+                    stagnation = route.get("stagnation_rounds", 0)
+                    msg = (
+                        f"[route attempt={attempt} model={model_name} base={api_base} "
+                        f"escalated={escalated} timeout={timeout} stagnation={stagnation}]"
+                    )
+                    if callable(log_fn):
+                        log_fn(msg)
+                    else:
+                        print(msg)
             return rewritten, None
         except Exception as exc:  # noqa: BLE001
             last_error = str(exc)
             if attempt < max_attempts:
-                print(f"retrying after error: {last_error}")
+                if callable(log_fn):
+                    log_fn(f"retrying after error: {last_error}")
+                else:
+                    print(f"retrying after error: {last_error}")
 
     return None, last_error
 
@@ -592,6 +639,7 @@ def main() -> None:
             issues=issues,
             tags=tags,
             score=score,
+            loop_index=1,
             max_attempts=2,
         )
         elapsed = time.time() - start

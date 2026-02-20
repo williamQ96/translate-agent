@@ -70,6 +70,7 @@ class RAGStore:
         self.rrf_k = int(retrieval_cfg.get("rrf_k", 60))
         self.context_max_chars = int(retrieval_cfg.get("context_max_chars", 2200))
         self.min_confidence = float(retrieval_cfg.get("min_confidence", 0.25))
+        self.log_trace = bool(retrieval_cfg.get("log_trace", True))
 
         # Rerank settings
         self.rerank_enabled = bool(rerank_cfg.get("enabled", False))
@@ -319,6 +320,30 @@ class RAGStore:
             return query_text
         return " ".join(dedup[:24])
 
+    def _prepare_web_query(self, query_text: str) -> str:
+        """
+        Prepare shorter, less noisy query for web search.
+        Long raw chunk text often yields poor search quality.
+        """
+        rewritten = self._rewrite_query(query_text)
+        tokens = _tokenize(rewritten)
+        if not tokens:
+            tokens = _tokenize(query_text)
+        if not tokens:
+            return query_text.strip()
+
+        # keep early unique terms; enough for entity/topic matching
+        seen = set()
+        keep: list[str] = []
+        for t in tokens:
+            if t in seen:
+                continue
+            seen.add(t)
+            keep.append(t)
+            if len(keep) >= 12:
+                break
+        return " ".join(keep) if keep else rewritten.strip()
+
     def _load_web_cache(self) -> dict[str, Any]:
         path = self.web_cache_path
         try:
@@ -341,7 +366,13 @@ class RAGStore:
             pass
 
     def _http_get_json(self, url: str, headers: dict[str, str] | None = None) -> Any:
-        req = urllib.request.Request(url, headers=headers or {})
+        merged_headers = {
+            "User-Agent": "translate-agent/0.32 (+local-rag-web-fallback)",
+            "Accept": "application/json",
+        }
+        if headers:
+            merged_headers.update(headers)
+        req = urllib.request.Request(url, headers=merged_headers)
         with urllib.request.urlopen(req, timeout=self.web_timeout) as resp:
             body = resp.read().decode("utf-8", errors="ignore")
             return json.loads(body)
@@ -444,7 +475,8 @@ class RAGStore:
         if not self.web_enabled or self.web_provider in {"off", "none", ""}:
             return []
 
-        key = f"{self.web_provider}::{query.strip().lower()}"
+        prepared_query = self._prepare_web_query(query)
+        key = f"{self.web_provider}::{prepared_query.strip().lower()}"
         cache = self._load_web_cache()
         if key in cache:
             items = cache.get(key, [])
@@ -466,11 +498,11 @@ class RAGStore:
 
         try:
             if self.web_provider == "wikipedia":
-                found = self._web_search_wikipedia(query)
+                found = self._web_search_wikipedia(prepared_query)
             elif self.web_provider == "tavily":
-                found = self._web_search_tavily(query)
+                found = self._web_search_tavily(prepared_query)
             elif self.web_provider == "bing":
-                found = self._web_search_bing(query)
+                found = self._web_search_bing(prepared_query)
             else:
                 found = []
         except Exception:
@@ -550,6 +582,14 @@ class RAGStore:
             "candidate_count": len(candidates),
             "web_count": len(web_candidates),
         }
+        if self.log_trace:
+            print(
+                "    RAG TRACE: "
+                f"confidence={conf:.3f} "
+                f"query_rewritten={corrected} "
+                f"web_count={len(web_candidates)} "
+                f"mode={self.mode}"
+            )
         return "\n\n".join(context_parts)
 
     def clear(self):
